@@ -2,7 +2,7 @@
     ============================================================
     STYLED AVATAR PREVIEWS + AUTO LAYOUT + ACCOUNT AGE + PING
     + TELEPORT MENU + MOBILE CONFIRM POPUP + BACON DETECTOR
-    + FADE TOGGLE ANIMATION
+    + FADE TOGGLE ANIMATION + EXECUTOR PING COLOR SETUP SAVE
     ============================================================
 
     Press K to toggle the whole overlay:
@@ -11,6 +11,12 @@
     - teleport menu button
     - teleport menu panel
     - mobile confirmation popup
+
+    FIRST RUN:
+    - If no saved ping config exists, a setup popup appears.
+    - Choose the max ping for GREEN and ORANGE.
+    - RED is anything above ORANGE.
+    - Config is saved with executor file APIs and loaded next time.
 ]]
 
 --==============================================================
@@ -66,6 +72,9 @@ local FFA_ID               = 129604661913557
 local GUN_GAME_ID          = 133215910299950
 local MOBILE_SERVER_ID     = 18126510175
 
+local CONFIG_FOLDER        = "AvatarPreviewSystem"
+local CONFIG_FILE          = CONFIG_FOLDER .. "/PingConfig.json"
+
 --==============================================================
 -- 3) STATE + UTILITY HELPERS
 --==============================================================
@@ -93,6 +102,12 @@ local teleportWarningLabel = nil
 local mobileConfirmFrame = nil
 local mobileConfirmFadeCover = nil
 
+local firstRunConfigFrame = nil
+local firstRunFadeCover = nil
+local greenInputBox = nil
+local orangeInputBox = nil
+local configStatusLabel = nil
+
 local activeNotifications = {}
 local NOTIFICATION_SPACING = 12
 
@@ -100,6 +115,11 @@ local pingUpdateAccumulator = 0
 
 local layoutDirty = true
 local lastViewportSize = Vector2.new(0, 0)
+
+local pingColorConfig = {
+    greenMax = 80,
+    orangeMax = 140
+}
 
 local function trackConnection(conn)
     table.insert(connections, conn)
@@ -174,28 +194,171 @@ local function tweenObject(instance, info, props)
     return tween
 end
 
---==============================================================
--- 4) TOP BAR: PING + TELEPORT MENU BUTTON
---==============================================================
+local function getIsFile()
+    return isfile or (typeof(readfile) == "function" and function(path)
+        local ok = pcall(function()
+            return readfile(path)
+        end)
+        return ok
+    end)
+end
 
-local function getPingText()
-    local ping = "?"
+local function getMakeFolder()
+    return makefolder or createfolder
+end
 
+local function executorFileAvailable()
+    return typeof(readfile) == "function"
+        and typeof(writefile) == "function"
+end
+
+local function ensureConfigFolder()
+    local makeFolderFn = getMakeFolder()
+    if typeof(makeFolderFn) ~= "function" then
+        return
+    end
+
+    if typeof(isfolder) == "function" then
+        local ok, exists = pcall(function()
+            return isfolder(CONFIG_FOLDER)
+        end)
+        if ok and exists then
+            return
+        end
+    end
+
+    pcall(function()
+        makeFolderFn(CONFIG_FOLDER)
+    end)
+end
+
+local function clampNumber(n, minValue, maxValue, fallback)
+    n = tonumber(n)
+    if not n then
+        return fallback
+    end
+
+    n = math.floor(n + 0.5)
+
+    if n < minValue then
+        n = minValue
+    end
+
+    if n > maxValue then
+        n = maxValue
+    end
+
+    return n
+end
+
+local function savePingConfig()
+    if not executorFileAvailable() then
+        warn("Executor file functions not available; ping config cannot be saved.")
+        return false
+    end
+
+    ensureConfigFolder()
+
+    local payload = {
+        greenMax = pingColorConfig.greenMax,
+        orangeMax = pingColorConfig.orangeMax
+    }
+
+    local ok, err = pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode(payload))
+    end)
+
+    if not ok then
+        warn("Failed to save ping config:", err)
+        return false
+    end
+
+    return true
+end
+
+local function loadPingConfig()
+    local isFileFn = getIsFile()
+    if not executorFileAvailable() or typeof(isFileFn) ~= "function" then
+        return false
+    end
+
+    local ok, exists = pcall(function()
+        return isFileFn(CONFIG_FILE)
+    end)
+
+    if not ok or not exists then
+        return false
+    end
+
+    local readOk, raw = pcall(function()
+        return readfile(CONFIG_FILE)
+    end)
+
+    if not readOk or not raw or raw == "" then
+        return false
+    end
+
+    local decodeOk, data = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+
+    if not decodeOk or typeof(data) ~= "table" then
+        return false
+    end
+
+    local greenMax = clampNumber(data.greenMax, 1, 9999, 80)
+    local orangeMax = clampNumber(data.orangeMax, greenMax + 1, 9999, 140)
+
+    pingColorConfig.greenMax = greenMax
+    pingColorConfig.orangeMax = orangeMax
+
+    return true
+end
+
+local function getPingNumber()
     local ok, result = pcall(function()
         local networkPing = LocalPlayer:GetNetworkPing()
         return math.floor((networkPing * 1000) + 0.5)
     end)
 
     if ok and result then
-        ping = tostring(result)
+        return result
     end
 
-    return ping .. " ms"
+    return nil
+end
+
+local function getPingColor(pingMs)
+    if typeof(pingMs) ~= "number" then
+        return Color3.fromRGB(230, 240, 255)
+    end
+
+    if pingMs <= pingColorConfig.greenMax then
+        return Color3.fromRGB(120, 255, 140)
+    elseif pingMs <= pingColorConfig.orangeMax then
+        return Color3.fromRGB(255, 190, 90)
+    else
+        return Color3.fromRGB(255, 105, 105)
+    end
+end
+
+--==============================================================
+-- 4) TOP BAR: PING + TELEPORT MENU BUTTON + FIRST RUN CONFIG
+--==============================================================
+
+local function getPingText()
+    local ping = getPingNumber()
+    if typeof(ping) == "number" then
+        return ping .. " ms", ping
+    end
+    return "? ms", nil
 end
 
 local function updatePingDisplay()
     if pingLabel then
-        pingLabel.Text = "Ping: " .. getPingText()
+        local text, pingMs = getPingText()
+        pingLabel.Text = "Ping: " .. text
+        pingLabel.TextColor3 = getPingColor(pingMs)
     end
 end
 
@@ -230,18 +393,85 @@ local function showMobileConfirmPopup()
     end
 
     mobileConfirmFrame.Visible = true
-    mobileConfirmFadeCover.BackgroundTransparency = 0
-    tweenObject(
-        mobileConfirmFadeCover,
-        TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        {BackgroundTransparency = 1}
-    )
+    if mobileConfirmFadeCover then
+        mobileConfirmFadeCover.BackgroundTransparency = 0
+        tweenObject(
+            mobileConfirmFadeCover,
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {BackgroundTransparency = 1}
+        )
+    end
 end
 
 local function hideMobileConfirmPopup()
     if mobileConfirmFrame then
         mobileConfirmFrame.Visible = false
     end
+end
+
+local function showFirstRunConfigPopup()
+    if not firstRunConfigFrame then
+        return
+    end
+
+    firstRunConfigFrame.Visible = true
+    if greenInputBox then
+        greenInputBox.Text = tostring(pingColorConfig.greenMax)
+    end
+    if orangeInputBox then
+        orangeInputBox.Text = tostring(pingColorConfig.orangeMax)
+    end
+    if configStatusLabel then
+        configStatusLabel.Text = "Choose your ping color limits."
+        configStatusLabel.TextColor3 = Color3.fromRGB(200, 220, 255)
+    end
+
+    if firstRunFadeCover then
+        firstRunFadeCover.BackgroundTransparency = 0
+        tweenObject(
+            firstRunFadeCover,
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {BackgroundTransparency = 1}
+        )
+    end
+end
+
+local function hideFirstRunConfigPopup()
+    if firstRunConfigFrame then
+        firstRunConfigFrame.Visible = false
+    end
+end
+
+local function createLabeledInput(parent, titleText, placeholderText, yPos)
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0, 18, 0, yPos)
+    title.Size = UDim2.new(1, -36, 0, 24)
+    title.Text = titleText
+    title.TextColor3 = Color3.fromRGB(230, 240, 255)
+    title.Font = Enum.Font.GothamSemibold
+    title.TextSize = 18
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = parent
+
+    local box = Instance.new("TextBox")
+    box.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+    box.BackgroundTransparency = 0.12
+    box.BorderSizePixel = 0
+    box.Position = UDim2.new(0, 18, 0, yPos + 28)
+    box.Size = UDim2.new(1, -36, 0, 42)
+    box.PlaceholderText = placeholderText
+    box.Text = ""
+    box.ClearTextOnFocus = false
+    box.TextColor3 = Color3.fromRGB(245, 250, 255)
+    box.PlaceholderColor3 = Color3.fromRGB(140, 150, 175)
+    box.Font = Enum.Font.GothamSemibold
+    box.TextSize = 20
+    box.Parent = parent
+    addCorner(box, 12)
+    addStroke(box, Color3.fromRGB(130, 165, 230), 1.2, 0.35)
+
+    return box
 end
 
 local function createTopBarAndMenu()
@@ -258,6 +488,11 @@ local function createTopBarAndMenu()
         teleportWarningLabel = nil
         mobileConfirmFrame = nil
         mobileConfirmFadeCover = nil
+        firstRunConfigFrame = nil
+        firstRunFadeCover = nil
+        greenInputBox = nil
+        orangeInputBox = nil
+        configStatusLabel = nil
     end
 
     topBarGui = Instance.new("ScreenGui")
@@ -297,7 +532,7 @@ local function createTopBarAndMenu()
     pingLabel.TextStrokeTransparency = 0.85
     pingLabel.Font = Enum.Font.GothamBold
     pingLabel.TextSize = 24
-    pingLabel.Text = "Ping: " .. getPingText()
+    pingLabel.Text = "Ping: ..."
     pingLabel.Parent = pingHolder
 
     pingFadeCover = createFadeCover(pingHolder, Color3.fromRGB(18, 20, 28), 20, 14)
@@ -493,8 +728,92 @@ local function createTopBarAndMenu()
 
     mobileConfirmFadeCover = createFadeCover(mobileConfirmFrame, Color3.fromRGB(17, 19, 27), 20, 16)
 
+    -- First run config popup
+    firstRunConfigFrame = Instance.new("Frame")
+    firstRunConfigFrame.Name = "FirstRunConfigFrame"
+    firstRunConfigFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    firstRunConfigFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    firstRunConfigFrame.Size = UDim2.new(0, 470, 0, 340)
+    firstRunConfigFrame.BackgroundColor3 = Color3.fromRGB(17, 19, 27)
+    firstRunConfigFrame.BackgroundTransparency = 0.04
+    firstRunConfigFrame.BorderSizePixel = 0
+    firstRunConfigFrame.Visible = false
+    firstRunConfigFrame.Parent = topBarGui
+    addCorner(firstRunConfigFrame, 16)
+    addStroke(firstRunConfigFrame, Color3.fromRGB(120, 150, 255), 1.4, 0.35)
+    addGradient(firstRunConfigFrame, Color3.fromRGB(24, 28, 40), Color3.fromRGB(14, 16, 24), 90)
+
+    local cfgTitle = Instance.new("TextLabel")
+    cfgTitle.Name = "ConfigTitle"
+    cfgTitle.BackgroundTransparency = 1
+    cfgTitle.Position = UDim2.new(0, 18, 0, 12)
+    cfgTitle.Size = UDim2.new(1, -36, 0, 30)
+    cfgTitle.Text = "First Time Ping Setup"
+    cfgTitle.TextColor3 = Color3.fromRGB(240, 245, 255)
+    cfgTitle.Font = Enum.Font.GothamBold
+    cfgTitle.TextSize = 24
+    cfgTitle.TextXAlignment = Enum.TextXAlignment.Left
+    cfgTitle.Parent = firstRunConfigFrame
+
+    local cfgDivider = Instance.new("Frame")
+    cfgDivider.BackgroundColor3 = Color3.fromRGB(95, 115, 170)
+    cfgDivider.BackgroundTransparency = 0.45
+    cfgDivider.BorderSizePixel = 0
+    cfgDivider.Position = UDim2.new(0, 18, 0, 48)
+    cfgDivider.Size = UDim2.new(1, -36, 0, 1)
+    cfgDivider.Parent = firstRunConfigFrame
+
+    local cfgDesc = Instance.new("TextLabel")
+    cfgDesc.BackgroundTransparency = 1
+    cfgDesc.Position = UDim2.new(0, 18, 0, 60)
+    cfgDesc.Size = UDim2.new(1, -36, 0, 42)
+    cfgDesc.Text = "Choose the highest ping that should count as green and orange. Anything above orange becomes red."
+    cfgDesc.TextColor3 = Color3.fromRGB(210, 225, 245)
+    cfgDesc.Font = Enum.Font.Gotham
+    cfgDesc.TextSize = 16
+    cfgDesc.TextWrapped = true
+    cfgDesc.TextXAlignment = Enum.TextXAlignment.Left
+    cfgDesc.TextYAlignment = Enum.TextYAlignment.Top
+    cfgDesc.Parent = firstRunConfigFrame
+
+    greenInputBox = createLabeledInput(firstRunConfigFrame, "Green up to (ms)", "Example: 80", 112)
+    orangeInputBox = createLabeledInput(firstRunConfigFrame, "Orange up to (ms)", "Example: 140", 192)
+
+    configStatusLabel = Instance.new("TextLabel")
+    configStatusLabel.BackgroundTransparency = 1
+    configStatusLabel.Position = UDim2.new(0, 18, 1, -76)
+    configStatusLabel.Size = UDim2.new(1, -36, 0, 22)
+    configStatusLabel.Text = ""
+    configStatusLabel.TextColor3 = Color3.fromRGB(200, 220, 255)
+    configStatusLabel.Font = Enum.Font.Gotham
+    configStatusLabel.TextSize = 15
+    configStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    configStatusLabel.Parent = firstRunConfigFrame
+
+    local saveConfigButton = Instance.new("TextButton")
+    saveConfigButton.Name = "SaveConfigButton"
+    saveConfigButton.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+    saveConfigButton.BackgroundTransparency = 0.12
+    saveConfigButton.BorderSizePixel = 0
+    saveConfigButton.Position = UDim2.new(0, 18, 1, -48)
+    saveConfigButton.Size = UDim2.new(1, -36, 0, 36)
+    saveConfigButton.Text = "Save Ping Colors"
+    saveConfigButton.TextColor3 = Color3.fromRGB(240, 245, 255)
+    saveConfigButton.Font = Enum.Font.GothamSemibold
+    saveConfigButton.TextSize = 18
+    saveConfigButton.AutoButtonColor = false
+    saveConfigButton.Parent = firstRunConfigFrame
+    addCorner(saveConfigButton, 12)
+    addStroke(saveConfigButton, Color3.fromRGB(130, 165, 230), 1.2, 0.25)
+
+    firstRunFadeCover = createFadeCover(firstRunConfigFrame, Color3.fromRGB(17, 19, 27), 20, 16)
+
     trackConnection(teleportMenuButton.MouseButton1Click:Connect(function()
         if not previewsVisible then
+            return
+        end
+
+        if firstRunConfigFrame and firstRunConfigFrame.Visible then
             return
         end
 
@@ -542,6 +861,49 @@ local function createTopBarAndMenu()
         hideMobileConfirmPopup()
         showTeleportWarning("Mobile teleport cancelled.")
     end))
+
+    trackConnection(saveConfigButton.MouseButton1Click:Connect(function()
+        local greenValue = clampNumber(greenInputBox and greenInputBox.Text, 1, 9999, nil)
+        local orangeValue = clampNumber(orangeInputBox and orangeInputBox.Text, 1, 9999, nil)
+
+        if not greenValue or not orangeValue then
+            if configStatusLabel then
+                configStatusLabel.Text = "Enter valid numbers for both values."
+                configStatusLabel.TextColor3 = Color3.fromRGB(255, 140, 140)
+            end
+            return
+        end
+
+        if orangeValue <= greenValue then
+            if configStatusLabel then
+                configStatusLabel.Text = "Orange must be greater than green."
+                configStatusLabel.TextColor3 = Color3.fromRGB(255, 140, 140)
+            end
+            return
+        end
+
+        pingColorConfig.greenMax = greenValue
+        pingColorConfig.orangeMax = orangeValue
+
+        local saved = savePingConfig()
+        updatePingDisplay()
+
+        if configStatusLabel then
+            if saved then
+                configStatusLabel.Text = "Saved successfully."
+                configStatusLabel.TextColor3 = Color3.fromRGB(120, 255, 140)
+            else
+                configStatusLabel.Text = "Saved for this session only. Executor file API missing."
+                configStatusLabel.TextColor3 = Color3.fromRGB(255, 190, 90)
+            end
+        end
+
+        task.delay(0.6, function()
+            hideFirstRunConfigPopup()
+        end)
+    end))
+
+    updatePingDisplay()
 end
 
 local function setTopBarVisibleAnimated(visible)
@@ -569,6 +931,11 @@ local function setTopBarVisibleAnimated(visible)
             tweenObject(mobileConfirmFadeCover, info, {BackgroundTransparency = 1})
         end
 
+        if firstRunConfigFrame and firstRunConfigFrame.Visible and firstRunFadeCover then
+            firstRunFadeCover.BackgroundTransparency = 0
+            tweenObject(firstRunFadeCover, info, {BackgroundTransparency = 1})
+        end
+
         updatePingDisplay()
     else
         local pending = 0
@@ -592,6 +959,10 @@ local function setTopBarVisibleAnimated(visible)
 
         if mobileConfirmFrame then
             mobileConfirmFrame.Visible = false
+        end
+
+        if firstRunConfigFrame then
+            firstRunConfigFrame.Visible = false
         end
 
         if pending == 0 and topBarGui then
@@ -1596,6 +1967,11 @@ function System.Shutdown()
         teleportWarningLabel = nil
         mobileConfirmFrame = nil
         mobileConfirmFadeCover = nil
+        firstRunConfigFrame = nil
+        firstRunFadeCover = nil
+        greenInputBox = nil
+        orangeInputBox = nil
+        configStatusLabel = nil
     end
 
     for _, obj in ipairs(CoreGui:GetChildren()) do
@@ -1614,10 +1990,20 @@ end
 -- STARTUP
 --==============================================================
 
+local hadSavedConfig = loadPingConfig()
+
 createTopBarAndMenu()
 layoutDirty = true
 updateAllPreviews()
 initialBaconScan()
 
-print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Teleport Menu + Mobile Confirm Popup + Bigger Stats Text + Account Age + Ping + Bacon Detector LOADED!")
+if not hadSavedConfig then
+    task.delay(0.2, function()
+        if not shuttingDown then
+            showFirstRunConfigPopup()
+        end
+    end)
+end
+
+print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Teleport Menu + Mobile Confirm Popup + Bigger Stats Text + Account Age + Ping + Bacon Detector + Saved Ping Colors LOADED!")
 print("💡 Press K to toggle everything (cards + ping + teleport button + teleport menu + popup)")
