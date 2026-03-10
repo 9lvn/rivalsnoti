@@ -629,8 +629,13 @@ trackConnection(UserInputService.InputBegan:Connect(function(input, gameProcesse
             end
         end
 
+        if pingGui then
+            pingGui.Enabled = previewsVisible
+        end
+
         if previewsVisible then
             updateAllPreviews()
+            updatePingDisplay()
             print("Previews SHOWN")
         else
             print("Previews HIDDEN")
