@@ -3,6 +3,7 @@
     STYLED AVATAR PREVIEWS + AUTO LAYOUT + ACCOUNT AGE + PING
     + TELEPORT MENU + MOBILE CONFIRM POPUP + BACON DETECTOR
     + FADE TOGGLE ANIMATION + EXECUTOR PING COLOR SETUP SAVE
+    + CLICK PING TO REFRESH VALUES
     ============================================================
 
     Press K to toggle the whole overlay:
@@ -17,11 +18,17 @@
     - Choose the max ping for GREEN and ORANGE.
     - RED is anything above ORANGE.
     - Config is saved with executor file APIs and loaded next time.
+
+    CLICK PING BOX:
+    - Clears cached avatar values
+    - Clears stat update cooldowns
+    - Refreshes all visible preview values
+    - Updates ping instantly
 ]]
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 1) SERVICES + SINGLETON CLEANUP
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local HttpService          = game:GetService("HttpService")
 local Players              = game:GetService("Players")
@@ -44,9 +51,9 @@ end
 local System = {}
 _G.AvatarPreviewSystem = System
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 2) CONFIG VALUES
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local BASE_PREVIEW_WIDTH   = 470
 local BASE_PREVIEW_HEIGHT  = 730
@@ -75,9 +82,9 @@ local MOBILE_SERVER_ID     = 18126510175
 local CONFIG_FOLDER        = "AvatarPreviewSystem"
 local CONFIG_FILE          = CONFIG_FOLDER .. "/PingConfig.json"
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 3) STATE + UTILITY HELPERS
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local avatarValueCache = {}
 local activePreviews = {}
@@ -117,8 +124,8 @@ local layoutDirty = true
 local lastViewportSize = Vector2.new(0, 0)
 
 local pingColorConfig = {
-    greenMax = 80,
-    orangeMax = 140
+    greenMax = 30,
+    orangeMax = 60
 }
 
 local function trackConnection(conn)
@@ -342,9 +349,9 @@ local function getPingColor(pingMs)
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 4) TOP BAR: PING + TELEPORT MENU BUTTON + FIRST RUN CONFIG
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local function getPingText()
     local ping = getPingNumber()
@@ -359,6 +366,22 @@ local function updatePingDisplay()
         local text, pingMs = getPingText()
         pingLabel.Text = "Ping: " .. text
         pingLabel.TextColor3 = getPingColor(pingMs)
+    end
+end
+
+local function refreshAllDisplayedValues()
+    table.clear(avatarValueCache)
+    table.clear(updateCooldown)
+
+    updatePingDisplay()
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local preview = activePreviews[player.UserId]
+            if preview then
+                updateStatsLabel(player.UserId, player)
+            end
+        end
     end
 end
 
@@ -442,6 +465,28 @@ local function hideFirstRunConfigPopup()
     end
 end
 
+local function toggleFirstRunConfigPopup()
+    if not firstRunConfigFrame then
+        return
+    end
+
+    local shouldOpen = not firstRunConfigFrame.Visible
+
+    if shouldOpen then
+        if teleportMenu then
+            teleportMenu.Visible = false
+        end
+
+        if mobileConfirmFrame then
+            mobileConfirmFrame.Visible = false
+        end
+
+        showFirstRunConfigPopup()
+    else
+        hideFirstRunConfigPopup()
+    end
+end
+
 local function createLabeledInput(parent, titleText, placeholderText, yPos)
     local title = Instance.new("TextLabel")
     title.BackgroundTransparency = 1
@@ -511,17 +556,27 @@ local function createTopBarAndMenu()
     container.BackgroundTransparency = 1
     container.Parent = topBarGui
 
-    pingHolder = Instance.new("Frame")
+    local pingHolderVisual = Instance.new("Frame")
+    pingHolderVisual.Name = "PingHolderVisual"
+    pingHolderVisual.Position = UDim2.new(0, 0, 0, 0)
+    pingHolderVisual.Size = UDim2.new(0, 200, 0, 54)
+    pingHolderVisual.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+    pingHolderVisual.BackgroundTransparency = 0.08
+    pingHolderVisual.BorderSizePixel = 0
+    pingHolderVisual.Parent = container
+    addCorner(pingHolderVisual, 14)
+    addStroke(pingHolderVisual, Color3.fromRGB(120, 160, 255), 1.4, 0.35)
+    addGradient(pingHolderVisual, Color3.fromRGB(22, 24, 35), Color3.fromRGB(16, 18, 26), 90)
+
+    pingHolder = Instance.new("TextButton")
     pingHolder.Name = "PingHolder"
     pingHolder.Position = UDim2.new(0, 0, 0, 0)
     pingHolder.Size = UDim2.new(0, 200, 0, 54)
-    pingHolder.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
-    pingHolder.BackgroundTransparency = 0.08
+    pingHolder.BackgroundTransparency = 1
     pingHolder.BorderSizePixel = 0
+    pingHolder.Text = ""
+    pingHolder.AutoButtonColor = false
     pingHolder.Parent = container
-    addCorner(pingHolder, 14)
-    addStroke(pingHolder, Color3.fromRGB(120, 160, 255), 1.4, 0.35)
-    addGradient(pingHolder, Color3.fromRGB(22, 24, 35), Color3.fromRGB(16, 18, 26), 90)
 
     pingLabel = Instance.new("TextLabel")
     pingLabel.Name = "PingLabel"
@@ -533,9 +588,30 @@ local function createTopBarAndMenu()
     pingLabel.Font = Enum.Font.GothamBold
     pingLabel.TextSize = 24
     pingLabel.Text = "Ping: ..."
-    pingLabel.Parent = pingHolder
+    pingLabel.Parent = pingHolderVisual
 
-    pingFadeCover = createFadeCover(pingHolder, Color3.fromRGB(18, 20, 28), 20, 14)
+    pingFadeCover = createFadeCover(pingHolderVisual, Color3.fromRGB(18, 20, 28), 20, 14)
+
+    trackConnection(pingHolder.MouseButton1Click:Connect(function()
+        if not previewsVisible then
+            return
+        end
+
+        if pingFadeCover then
+            pingFadeCover.BackgroundTransparency = 0.55
+            tweenObject(
+                pingFadeCover,
+                TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                {BackgroundTransparency = 1}
+            )
+        end
+
+        toggleFirstRunConfigPopup()
+
+        task.spawn(function()
+            refreshAllDisplayedValues()
+        end)
+    end))
 
     local teleportButtonHolder = Instance.new("Frame")
     teleportButtonHolder.Name = "TeleportButtonHolder"
@@ -728,7 +804,6 @@ local function createTopBarAndMenu()
 
     mobileConfirmFadeCover = createFadeCover(mobileConfirmFrame, Color3.fromRGB(17, 19, 27), 20, 16)
 
-    -- First run config popup
     firstRunConfigFrame = Instance.new("Frame")
     firstRunConfigFrame.Name = "FirstRunConfigFrame"
     firstRunConfigFrame.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -971,9 +1046,9 @@ local function setTopBarVisibleAnimated(visible)
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 5) RANK / AVATAR VALUE HELPERS
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local function getRankFromElo(elo)
     if elo <= 0 then
@@ -981,26 +1056,13 @@ local function getRankFromElo(elo)
     end
 
     local ranks = {
-        {200,  "Bronze I"},
-        {400,  "Bronze II"},
-        {600,  "Bronze III"},
-        {800,  "Silver I"},
-        {1000, "Silver II"},
-        {1200, "Silver III"},
-        {1400, "Gold I"},
-        {1600, "Gold II"},
-        {1800, "Gold III"},
-        {2000, "Platinum I"},
-        {2200, "Platinum II"},
-        {2400, "Platinum III"},
-        {2600, "Diamond I"},
-        {2800, "Diamond II"},
-        {3000, "Diamond III"},
-        {3200, "Onyx I"},
-        {3400, "Onyx II"},
-        {3600, "Onyx III"},
-        {4000, "Nemesis"},
-        {math.huge, "Archnemesis"}
+        {200,  "Bronze I"},    {400,  "Bronze II"},   {600,  "Bronze III"},
+        {800,  "Silver I"},    {1000, "Silver II"},   {1200, "Silver III"},
+        {1400, "Gold I"},      {1600, "Gold II"},     {1800, "Gold III"},
+        {2000, "Platinum I"},  {2200, "Platinum II"}, {2400, "Platinum III"},
+        {2600, "Diamond I"},   {2800, "Diamond II"},  {3000, "Diamond III"},
+        {3200, "Onyx I"},      {3400, "Onyx II"},     {3600, "Onyx III"},
+        {12500, "Nemesis"},     {math.huge, "Archnemesis"}
     }
 
     for i = 1, #ranks do
@@ -1035,7 +1097,6 @@ local function getAvatarValue(userId)
     end
 
     local assetIds = {}
-
     local fields = {
         "Shirt", "Pants", "GraphicTShirt", "Face",
         "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"
@@ -1086,9 +1147,9 @@ local function getAvatarValue(userId)
     return total
 end
 
---==============================================================
+--======================================================================================================================================================================================================================================================================================================================
 -- 6) CAMERA FITTING
---==============================================================
+--======================================================================================================================================================================================================================================================================================================================
 
 local function fitModelInViewport(preview)
     if not preview or not preview.Model or not preview.Camera or not preview.Viewport then
@@ -1132,35 +1193,11 @@ local function fitModelInViewport(preview)
     camera.CFrame = CFrame.new(cameraPos, focus)
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 7) PREVIEW CARDS
---==============================================================
+--========================================================================================================================================================================================================================================================
 
-local function cleanupPreview(userId)
-    local data = activePreviews[userId]
-    if not data then
-        return
-    end
-
-    if data.StatsConnections then
-        for _, conn in ipairs(data.StatsConnections) do
-            safeDisconnect(conn)
-        end
-    end
-
-    if data.Model then
-        safeDestroy(data.Model)
-    end
-
-    if data.Gui then
-        safeDestroy(data.Gui)
-    end
-
-    activePreviews[userId] = nil
-    updateCooldown[userId] = nil
-end
-
-local function updateStatsLabel(userId, player)
+function updateStatsLabel(userId, player)
     local preview = activePreviews[userId]
     if not preview or not player or not preview.StatsLabel then
         return
@@ -1217,6 +1254,30 @@ local function updateStatsLabel(userId, player)
         value,
         accountAge
     )
+end
+
+local function cleanupPreview(userId)
+    local data = activePreviews[userId]
+    if not data then
+        return
+    end
+
+    if data.StatsConnections then
+        for _, conn in ipairs(data.StatsConnections) do
+            safeDisconnect(conn)
+        end
+    end
+
+    if data.Model then
+        safeDestroy(data.Model)
+    end
+
+    if data.Gui then
+        safeDestroy(data.Gui)
+    end
+
+    activePreviews[userId] = nil
+    updateCooldown[userId] = nil
 end
 
 local function createAvatarPreview(player)
@@ -1469,9 +1530,9 @@ local function createAvatarPreview(player)
     end)
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 8) AUTO LAYOUT
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local function getOtherPlayersSorted()
     local others = {}
@@ -1576,9 +1637,9 @@ local function updateAllPreviews()
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 9) TOGGLE ANIMATION
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local function setPreviewsVisibleAnimated(visible)
     local info = TweenInfo.new(TOGGLE_FADE_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -1617,9 +1678,9 @@ local function setPreviewsVisibleAnimated(visible)
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 10) BACON DETECTOR + NOTIFICATION
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local BACON_VARIANTS = {
     {
@@ -1704,6 +1765,23 @@ local function isBacon(player)
     return false
 end
 
+local function updateNotificationStack(animated)
+    for i, notif in ipairs(activeNotifications) do
+        if notif and notif.Parent then
+            local targetPos = UDim2.new(1, -20, 0, 20 + ((i - 1) * (92 + NOTIFICATION_SPACING)))
+            if animated then
+                TweenService:Create(
+                    notif,
+                    TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    {Position = targetPos}
+                ):Play()
+            else
+                notif.Position = targetPos
+            end
+        end
+    end
+end
+
 local function showBaconWarning(name, baconType)
     pcall(function()
         local old = CoreGui:FindFirstChild("CustomNotificationContainer")
@@ -1768,24 +1846,6 @@ local function showBaconWarning(name, baconType)
     message.Parent = frame
 
     table.insert(activeNotifications, frame)
-
-    local function updateNotificationStack(animated)
-        for i, notif in ipairs(activeNotifications) do
-            if notif and notif.Parent then
-                local targetPos = UDim2.new(1, -20, 0, 20 + ((i - 1) * (92 + NOTIFICATION_SPACING)))
-                if animated then
-                    TweenService:Create(
-                        notif,
-                        TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-                        {Position = targetPos}
-                    ):Play()
-                else
-                    notif.Position = targetPos
-                end
-            end
-        end
-    end
-
     updateNotificationStack(false)
 
     local tweenIn = TweenService:Create(
@@ -1839,9 +1899,9 @@ local function initialBaconScan()
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- 11) CONNECTIONS / HEARTBEAT / CLEANUP
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 trackConnection(RunService.Heartbeat:Connect(function(deltaTime)
     if shuttingDown then
@@ -1986,9 +2046,9 @@ function System.Shutdown()
     end
 end
 
---==============================================================
+--========================================================================================================================================================================================================================================================
 -- STARTUP
---==============================================================
+--========================================================================================================================================================================================================================================================
 
 local hadSavedConfig = loadPingConfig()
 
@@ -2005,5 +2065,5 @@ if not hadSavedConfig then
     end)
 end
 
-print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Teleport Menu + Mobile Confirm Popup + Bigger Stats Text + Account Age + Ping + Bacon Detector + Saved Ping Colors LOADED!")
+print("✨ Styled Avatar Previews + Auto Layout + Better Camera Fit + Teleport Menu + Mobile Confirm Popup + Bigger Stats Text + Account Age + Ping + Bacon Detector + Saved Ping Colors + Click Ping Refresh LOADED!")
 print("💡 Press K to toggle everything (cards + ping + teleport button + teleport menu + popup)")
