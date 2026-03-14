@@ -1197,10 +1197,6 @@ end
 -- 7) PREVIEW CARDS
 --================================================================================================================================
 
---================================================================================================================================
--- 7) PREVIEW CARDS
---================================================================================================================================
-
 local function findStat(player, names)
     for _, name in ipairs(names) do
         local obj = player:FindFirstChild(name, true)
@@ -1249,7 +1245,7 @@ local function updateStatsLabel(userId, player)
     end
 
     data.StatsLabel.Text = string.format(
-        "Level %s   •   Streak %s   •   Rank %s\nValue %dR$   •   Account Age %s days",
+        "Level %s   •   Streak %s   •   %s\nValue %dR$   •   Account Age %s days",
         level,
         streak,
         rank,
