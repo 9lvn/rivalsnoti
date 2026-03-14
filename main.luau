@@ -1193,61 +1193,63 @@ local function fitModelInViewport(preview)
     camera.CFrame = CFrame.new(cameraPos, focus)
 end
 
---========================================================================================================================================================================================================================================================
+--================================================================================================================================
 -- 7) PREVIEW CARDS
---========================================================================================================================================================================================================================================================
+--================================================================================================================================
 
-function updateStatsLabel(userId, player)
-    local preview = activePreviews[userId]
-    if not preview or not player or not preview.StatsLabel then
+--================================================================================================================================
+-- 7) PREVIEW CARDS
+--================================================================================================================================
+
+local function findStat(player, names)
+    for _, name in ipairs(names) do
+        local obj = player:FindFirstChild(name, true)
+        if obj then
+            return obj
+        end
+    end
+end
+
+
+local function updateStatsLabel(userId, player)
+
+    local data = activePreviews[userId]
+    if not data or not data.StatsLabel then
         return
     end
-
-    local now = tick()
-    if updateCooldown[userId] and (now - updateCooldown[userId] < 0.5) then
-        return
-    end
-    updateCooldown[userId] = now
 
     local level = "?"
     local streak = "?"
-    local elo = 0
+    local rank = "?"
+    local value = getAvatarValue(userId)
     local accountAge = "?"
 
-    local leaderstats = player:FindFirstChild("leaderstats")
-    if leaderstats then
-        local levelValue = leaderstats:FindFirstChild("Level")
-        local streakValue = leaderstats:FindFirstChild("Win Streak")
+    local levelValue = findStat(player, {"Level","LEVEL","level"})
+    local streakValue = findStat(player, {"Win Streak","WinStreak","Streak","winstreak"})
 
-        if levelValue then
-            level = tostring(levelValue.Value)
-        end
-
-        if streakValue then
-            streak = tostring(streakValue.Value)
-        end
+    if levelValue then
+        level = tostring(levelValue.Value)
     end
 
-    local customLeaderstats = player:FindFirstChild("CustomLeaderstats")
-    if customLeaderstats then
-        local eloValue = customLeaderstats:FindFirstChild("Current ELO")
-        if eloValue then
-            elo = tonumber(eloValue.Value) or 0
-        end
+    if streakValue then
+        streak = tostring(streakValue.Value)
+    end
+
+    local eloValue = findStat(player, {"Current ELO","ELO","Elo"})
+    if eloValue then
+        rank = getRankFromElo(eloValue.Value)
     end
 
     local okAge, resultAge = pcall(function()
         return player.AccountAge
     end)
-    if okAge and resultAge then
+
+    if okAge then
         accountAge = tostring(resultAge)
     end
 
-    local rank = getRankFromElo(elo)
-    local value = getAvatarValue(userId)
-
-    preview.StatsLabel.Text = string.format(
-        "Level %s   •   Streak %s   •   %s\nValue %dR$   •   Account Age %s days",
+    data.StatsLabel.Text = string.format(
+        "Level %s   •   Streak %s   •   Rank %s\nValue %dR$   •   Account Age %s days",
         level,
         streak,
         rank,
@@ -1256,7 +1258,9 @@ function updateStatsLabel(userId, player)
     )
 end
 
+
 local function cleanupPreview(userId)
+
     local data = activePreviews[userId]
     if not data then
         return
@@ -1278,17 +1282,23 @@ local function cleanupPreview(userId)
 
     activePreviews[userId] = nil
     updateCooldown[userId] = nil
+
 end
 
+
+
 local function createAvatarPreview(player)
+
     if not player or player == LocalPlayer then
         return
     end
 
     local userId = player.UserId
+
     if activePreviews[userId] then
         return
     end
+
 
     local gui = Instance.new("ScreenGui")
     gui.Name = "AvatarPreview_" .. tostring(userId)
@@ -1299,103 +1309,73 @@ local function createAvatarPreview(player)
     gui.Enabled = previewsVisible
     gui.Parent = CoreGui
 
+
     local root = Instance.new("Frame")
     root.Name = "Root"
     root.Size = UDim2.new(0, BASE_PREVIEW_WIDTH, 0, BASE_PREVIEW_HEIGHT)
     root.BackgroundTransparency = 1
     root.Parent = gui
 
+
     local uiScale = Instance.new("UIScale")
-    uiScale.Scale = 1
     uiScale.Parent = root
 
-    local shadow = Instance.new("Frame")
-    shadow.Name = "Shadow"
-    shadow.Size = UDim2.new(1, 12, 1, 12)
-    shadow.Position = UDim2.new(0, -6, 0, -2)
-    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    shadow.BackgroundTransparency = 0.78
-    shadow.BorderSizePixel = 0
-    shadow.ZIndex = 0
-    shadow.Parent = root
-    addCorner(shadow, 22)
 
     local card = Instance.new("Frame")
-    card.Name = "Card"
-    card.Size = UDim2.new(1, 0, 1, 0)
-    card.BackgroundColor3 = Color3.fromRGB(17, 19, 27)
-    card.BackgroundTransparency = 0.1
+    card.Size = UDim2.new(1,0,1,0)
+    card.BackgroundColor3 = Color3.fromRGB(17,19,27)
     card.BorderSizePixel = 0
     card.Parent = root
-    addCorner(card, 20)
-    addStroke(card, Color3.fromRGB(120, 150, 255), 1.4, 0.45)
-    addGradient(card, Color3.fromRGB(24, 28, 40), Color3.fromRGB(14, 16, 24), 90)
+    addCorner(card,20)
+
 
     local nameLabel = Instance.new("TextLabel")
-    nameLabel.Name = "NameLabel"
-    nameLabel.Size = UDim2.new(1, -24, 0, NAME_HEIGHT)
-    nameLabel.Position = UDim2.new(0, 12, 0, 10)
+    nameLabel.Size = UDim2.new(1,-24,0,NAME_HEIGHT)
+    nameLabel.Position = UDim2.new(0,12,0,10)
     nameLabel.BackgroundTransparency = 1
-    nameLabel.TextColor3 = Color3.fromRGB(240, 245, 255)
-    nameLabel.TextStrokeTransparency = 0.9
+    nameLabel.TextColor3 = Color3.fromRGB(240,245,255)
     nameLabel.Font = Enum.Font.GothamBold
     nameLabel.TextSize = 28
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-    nameLabel.Text = "@" .. tostring(player.Name)
+    nameLabel.Text = "@"..player.Name
     nameLabel.Parent = card
 
-    local divider = Instance.new("Frame")
-    divider.Name = "Divider"
-    divider.Size = UDim2.new(1, -24, 0, 1)
-    divider.Position = UDim2.new(0, 12, 0, NAME_HEIGHT + 14)
-    divider.BackgroundColor3 = Color3.fromRGB(95, 115, 170)
-    divider.BackgroundTransparency = 0.45
-    divider.BorderSizePixel = 0
-    divider.Parent = card
 
     local viewport = Instance.new("ViewportFrame")
-    viewport.Name = "Viewport"
-    viewport.Size = UDim2.new(1, -24, 0, VIEWPORT_HEIGHT)
-    viewport.Position = UDim2.new(0, 12, 0, NAME_HEIGHT + 24)
-    viewport.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
-    viewport.BackgroundTransparency = 0.12
+    viewport.Size = UDim2.new(1,-24,0,VIEWPORT_HEIGHT)
+    viewport.Position = UDim2.new(0,12,0,NAME_HEIGHT+24)
+    viewport.BackgroundColor3 = Color3.fromRGB(10,12,18)
     viewport.BorderSizePixel = 0
-    viewport.Ambient = Color3.fromRGB(210, 220, 240)
-    viewport.LightColor = Color3.fromRGB(255, 245, 230)
     viewport.Parent = card
-    addCorner(viewport, 16)
-    addStroke(viewport, Color3.fromRGB(90, 110, 160), 1, 0.55)
+    addCorner(viewport,16)
+
 
     local worldModel = Instance.new("WorldModel")
-    worldModel.Name = "WorldModel"
     worldModel.Parent = viewport
 
+
     local camera = Instance.new("Camera")
-    camera.Name = "PreviewCamera"
+    camera.Parent = viewport
     camera.CameraType = Enum.CameraType.Scriptable
     camera.FieldOfView = 48
-    camera.Parent = viewport
     viewport.CurrentCamera = camera
+
 
     local label = Instance.new("TextLabel")
     label.Name = "StatsLabel"
-    label.Size = UDim2.new(1, -24, 0, LABEL_HEIGHT)
-    label.Position = UDim2.new(0, 12, 1, -LABEL_HEIGHT - 12)
+    label.Size = UDim2.new(1,-24,0,LABEL_HEIGHT)
+    label.Position = UDim2.new(0,12,1,-LABEL_HEIGHT-12)
     label.BackgroundTransparency = 1
-    label.TextColor3 = Color3.fromRGB(205, 255, 220)
-    label.TextStrokeTransparency = 0.88
-    label.TextStrokeColor3 = Color3.new(0, 0, 0)
-    label.TextSize = 27
+    label.TextColor3 = Color3.fromRGB(205,255,220)
     label.Font = Enum.Font.GothamSemibold
-    label.TextXAlignment = Enum.TextXAlignment.Center
-    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.TextSize = 27
     label.TextWrapped = true
     label.Text = "Loading..."
     label.Parent = card
 
-    local fadeCover = createFadeCover(card, Color3.fromRGB(17, 19, 27), 20, 20)
 
     activePreviews[userId] = {
+
         Gui = gui,
         Root = root,
         Card = card,
@@ -1406,130 +1386,90 @@ local function createAvatarPreview(player)
         NameLabel = nameLabel,
         Model = nil,
         StatsConnections = {},
-        ScaleObject = uiScale,
-        FadeCover = fadeCover,
+        ScaleObject = uiScale
     }
 
+
     task.spawn(function()
-        local preview = activePreviews[userId]
-        if not preview then
-            return
-        end
 
         local success, desc = pcall(function()
             return Players:GetHumanoidDescriptionFromUserIdAsync(userId)
         end)
 
         if not success or not desc then
-            if activePreviews[userId] and activePreviews[userId].StatsLabel then
-                activePreviews[userId].StatsLabel.Text = "Failed to load avatar"
-            end
+            label.Text = "Failed to load avatar"
             return
         end
+
 
         local modelSuccess, model = pcall(function()
             return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
         end)
 
         if not modelSuccess or not model then
-            if activePreviews[userId] and activePreviews[userId].StatsLabel then
-                activePreviews[userId].StatsLabel.Text = "Failed to build avatar"
-            end
+            label.Text = "Failed to build avatar"
             return
         end
 
+
         sanitizePreviewModel(model)
 
-        preview = activePreviews[userId]
-        if not preview or not preview.World then
+        local rootPart = model:FindFirstChild("HumanoidRootPart")
+        if rootPart then
+           rootPart.Anchored = true
+        end
+
+
+        local preview = activePreviews[userId]
+
+        if not preview then
             model:Destroy()
             return
         end
 
-        model:PivotTo(CFrame.new(0, 0, 0) * CFrame.Angles(0, math.pi, 0))
+
         model.Parent = preview.World
         preview.Model = model
 
+
+        model:PivotTo(CFrame.new(0,0,0) * CFrame.Angles(0,math.pi,0))
+
+
         task.wait()
-        fitModelInViewport(preview)
 
-        local value = getAvatarValue(userId)
-        local ageText = "?"
-        local okAge, resultAge = pcall(function()
-            return player.AccountAge
-        end)
-        if okAge and resultAge then
-            ageText = tostring(resultAge)
-        end
 
-        if preview.StatsLabel then
-            preview.StatsLabel.Text = string.format(
-                "Value %dR$   •   Account Age %s days\nLoading stats...",
-                value,
-                ageText
+        local cam = preview.Camera
+        local cf, size = model:GetBoundingBox()
+
+        local distance = math.max(size.X,size.Y,size.Z) * 2
+
+        cam.CFrame =
+            CFrame.new(
+                cf.Position + Vector3.new(0,size.Y*0.3,distance),
+                cf.Position + Vector3.new(0,size.Y*0.3,0)
             )
-        end
 
-        updateStatsLabel(userId, player)
+
+        updateStatsLabel(userId,player)
+
     end)
+
 
     task.spawn(function()
-        local preview = activePreviews[userId]
-        if not preview then
-            return
-        end
-
-        local statsConnections = preview.StatsConnections
-
-        local okLS, leaderstats = pcall(function()
-            return player:WaitForChild("leaderstats", 10)
-        end)
-
-        if okLS and leaderstats then
-            local levelValue = leaderstats:FindFirstChild("Level")
-            local streakValue = leaderstats:FindFirstChild("Win Streak")
-
-            if levelValue then
-                table.insert(statsConnections, levelValue.Changed:Connect(function()
-                    if activePreviews[userId] then
-                        updateStatsLabel(userId, player)
-                    end
-                end))
-            end
-
-            if streakValue then
-                table.insert(statsConnections, streakValue.Changed:Connect(function()
-                    if activePreviews[userId] then
-                        updateStatsLabel(userId, player)
-                    end
-                end))
-            end
-        end
-
-        local okCustom, customLeaderstats = pcall(function()
-            return player:WaitForChild("CustomLeaderstats", 10)
-        end)
-
-        if okCustom and customLeaderstats then
-            local eloValue = customLeaderstats:FindFirstChild("Current ELO")
-            if eloValue then
-                table.insert(statsConnections, eloValue.Changed:Connect(function()
-                    if activePreviews[userId] then
-                        updateStatsLabel(userId, player)
-                    end
-                end))
-            end
-        end
 
         while activePreviews[userId] and not shuttingDown do
-            if previewsVisible then
-                updateStatsLabel(userId, player)
-            end
-            task.wait(5)
-        end
-    end)
-end
 
+            if previewsVisible then
+                updateStatsLabel(userId,player)
+            end
+
+            task.wait(2)
+
+        end
+
+    end)
+
+end
 --========================================================================================================================================================================================================================================================
 -- 8) AUTO LAYOUT
 --========================================================================================================================================================================================================================================================
